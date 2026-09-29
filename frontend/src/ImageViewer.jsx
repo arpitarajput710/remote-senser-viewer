@@ -146,6 +146,8 @@ export default function ImageViewer() {
   const [showContainerModal, setShowContainerModal] = useState(false);
   const [fileDisplayNames, setFileDisplayNames] = useState({});
   const [selectedFile, setSelectedFile] = useState(null);
+  const [showBandControls, setShowBandControls] = useState(false);
+  const [selectedRasterBand, setSelectedRasterBand] = useState(1);
   const [rasterInfo, setRasterInfo] = useState(null);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [isUploading, setIsUploading] = useState(false);
@@ -156,6 +158,7 @@ export default function ImageViewer() {
   const [rFile, setRFile] = useState("");
   const [gFile, setGFile] = useState("");
   const [bFile, setBFile] = useState("");
+  const [rgbBandValues, setRgbBandValues] = useState({ r: 1, g: 1, b: 1 });
 
   const [showHistogram, setShowHistogram] = useState(false);
   const [histR, setHistR] = useState(null);
@@ -183,10 +186,13 @@ export default function ImageViewer() {
   const [showScatterPlot, setShowScatterPlot] = useState(false);
   const [scatterXFile, setScatterXFile] = useState("");
   const [scatterXBand, setScatterXBand] = useState(1);
+  const [scatterXBandCount, setScatterXBandCount] = useState(1);
   const [scatterYFile, setScatterYFile] = useState("");
   const [scatterYBand, setScatterYBand] = useState(1);
+  const [scatterYBandCount, setScatterYBandCount] = useState(1);
   const [scatterData, setScatterData] = useState(null);
   const [isScatterLoading, setIsScatterLoading] = useState(false);
+  const [scatterError, setScatterError] = useState("");
 
   const [isProfileMode, setIsProfileMode] = useState(false);
   const [profileStart, setProfileStart] = useState(null);
@@ -195,8 +201,21 @@ export default function ImageViewer() {
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [profileData, setProfileData] = useState(null);
   const [isProfileLoading, setIsProfileLoading] = useState(false);
+  const [profileError, setProfileError] = useState("");
   const [profileFile, setProfileFile] = useState("");
   const [selectedProfileBand, setSelectedProfileBand] = useState(1);
+  const [profileBandCount, setProfileBandCount] = useState(1);
+
+  const [roiSelection, setRoiSelection] = useState(null);
+  const [roiDraft, setRoiDraft] = useState(null);
+  const [roiScreenRect, setRoiScreenRect] = useState(null);
+  const [isRoiDrawing, setIsRoiDrawing] = useState(false);
+  const [showRoiPanel, setShowRoiPanel] = useState(false);
+  const [roiAnalysis, setRoiAnalysis] = useState(null);
+  const [isRoiLoading, setIsRoiLoading] = useState(false);
+  const [selectedRoiBand, setSelectedRoiBand] = useState(1);
+  const [roiAiAnalysis, setRoiAiAnalysis] = useState("");
+  const [isRoiAiLoading, setIsRoiAiLoading] = useState(false);
 
   const [isSwipeMode, setIsSwipeMode] = useState(false);
   const [swipeLeftFile, setSwipeLeftFile] = useState("");
@@ -224,6 +243,7 @@ export default function ImageViewer() {
   const mouseInfoTimeoutRef = useRef(null);
   const fallbackDragRef = useRef({ active: false, startX: 0, startY: 0, originX: 0, originY: 0 });
   const minimapDragRef = useRef({ active: false });
+  const roiDragRef = useRef({ start: null, pointerId: null });
 
   const containerRef = useRef(null);
   const abortControllerRef = useRef(null);
@@ -237,8 +257,10 @@ export default function ImageViewer() {
   const imageHistoryRef = useRef({});
   const historyContextRef = useRef(null);
   const viewerRef = useRef(null);
+  const selectedRasterBandRef = useRef(1);
   const osdContainerRef = useRef(null);
   const loadSequenceRef = useRef(0);
+  const scatterRequestRef = useRef(0);
   const osdFirstTileRef = useRef(false);
   const lastViewedFileByContainerRef = useRef({});
   const viewerInteractionRef = useRef({ dragging: false, lastX: 0, lastY: 0, moved: false, suppressClick: false });
@@ -281,10 +303,12 @@ export default function ImageViewer() {
       containerName: context.containerName,
       baseFile: context.baseFile,
       selectedFile: selectedFile || null,
+      selectedRasterBand: selectedRasterBandRef.current,
       viewMode,
       rFile,
       gFile,
       bFile,
+      rgbBandValues: { ...rgbBandValues },
       stretchValues: cloneStretchValues(stretchValues),
       histDropdownFile,
       histActiveChannel,
@@ -416,6 +440,9 @@ const expandMultiBandFile = async (containerName, filePath) => {
     return [];
   }, [activeContainer, containers]);
 
+  const roiSourceFile = selectedFile || rFile || activeFilesPool[0] || "";
+  const bandSourceFile = selectedFile || (viewMode === "rgb" ? rFile : "");
+
   const allFilesList = useMemo(() => Object.values(containers).flat(), [containers]);
 
   const getThumbnailUrl = useCallback((filePath) => {
@@ -446,6 +473,28 @@ const expandMultiBandFile = async (containerName, filePath) => {
     throw lastError || new Error("Metadata unavailable");
   };
 
+  useEffect(() => {
+    let active = true;
+    const updateBandCount = async (file, setCount, setBand) => {
+      if (!file) {
+        setCount(1);
+        setBand(1);
+        return;
+      }
+      try {
+        const metadata = await waitForRasterMetadata(getFullKey(file), 3, 180);
+        if (active) setCount(Math.max(1, metadata.bands || 1));
+      } catch {
+        if (active) setCount(1);
+      }
+    };
+
+    updateBandCount(scatterXFile, setScatterXBandCount, setScatterXBand);
+    updateBandCount(scatterYFile, setScatterYBandCount, setScatterYBand);
+    updateBandCount(profileFile, setProfileBandCount, setSelectedProfileBand);
+    return () => { active = false; };
+  }, [scatterXFile, scatterYFile, profileFile, activeContainer]);
+
   const buildOverviewUrl = (url) => {
   const parsed = new URL(url);
 
@@ -454,6 +503,9 @@ const expandMultiBandFile = async (containerName, filePath) => {
       r_file: parsed.searchParams.get("r_file") || "",
       g_file: parsed.searchParams.get("g_file") || "",
       b_file: parsed.searchParams.get("b_file") || "",
+      r_band: parsed.searchParams.get("r_band") || "1",
+      g_band: parsed.searchParams.get("g_band") || "1",
+      b_band: parsed.searchParams.get("b_band") || "1",
       max_size: "480",
     });
     ["r_min", "r_max", "g_min", "g_max", "b_min", "b_max"].forEach((key) => {
@@ -496,6 +548,9 @@ const buildFastPreviewUrl = (url) => {
       r_file: parsed.searchParams.get("r_file") || "",
       g_file: parsed.searchParams.get("g_file") || "",
       b_file: parsed.searchParams.get("b_file") || "",
+      r_band: parsed.searchParams.get("r_band") || "1",
+      g_band: parsed.searchParams.get("g_band") || "1",
+      b_band: parsed.searchParams.get("b_band") || "1",
       max_size: "260",
     });
     ["r_min", "r_max", "g_min", "g_max", "b_min", "b_max"].forEach((key) => {
@@ -739,7 +794,7 @@ const buildFastPreviewUrl = (url) => {
       };
 
       const buildRgbTileUrl = (level, x, y) => {
-        let tileUrl = `${API}/rgb-tile?r_file=${encodeURIComponent(getFullKey(tileParams.r))}&g_file=${encodeURIComponent(getFullKey(tileParams.g))}&b_file=${encodeURIComponent(getFullKey(tileParams.b))}&z=${level}&x=${x}&y=${y}`;
+        let tileUrl = `${API}/rgb-tile?r_file=${encodeURIComponent(getFullKey(tileParams.r))}&g_file=${encodeURIComponent(getFullKey(tileParams.g))}&b_file=${encodeURIComponent(getFullKey(tileParams.b))}&r_band=${tileParams.rBand}&g_band=${tileParams.gBand}&b_band=${tileParams.bBand}&z=${level}&x=${x}&y=${y}`;
         [["r_min", tileParams.rMin], ["r_max", tileParams.rMax], ["g_min", tileParams.gMin], ["g_max", tileParams.gMax], ["b_min", tileParams.bMin], ["b_max", tileParams.bMax]].forEach(([key, val]) => {
           if (val !== "" && val != null) tileUrl += `&${key}=${encodeURIComponent(val)}`;
         });
@@ -1117,6 +1172,9 @@ const loadImage = async (url, viewKey = null, preserveView = false, restoreViewp
       r: parsed.searchParams.get("r_file"),
       g: parsed.searchParams.get("g_file"),
       b: parsed.searchParams.get("b_file"),
+      rBand: Number(parsed.searchParams.get("r_band") || 1),
+      gBand: Number(parsed.searchParams.get("g_band") || 1),
+      bBand: Number(parsed.searchParams.get("b_band") || 1),
       rMin: parsed.searchParams.get("r_min"),
       rMax: parsed.searchParams.get("r_max"),
       gMin: parsed.searchParams.get("g_min"),
@@ -1185,9 +1243,10 @@ const loadImage = async (url, viewKey = null, preserveView = false, restoreViewp
     return () => window.removeEventListener("resize", updateMini);
   }, [displayedImageUrl, rasterInfo?.width, rasterInfo?.height, isSwipeMode]);
 
-  const buildSingleImageUrl = (fileKey, stretch = {}) => {
+  const buildSingleImageUrl = (fileKey, stretch = {}, bandOverride = null) => {
   const key = getFullKey(fileKey);
-  const { filename, band } = parseBandKey(key);
+    const { filename, band: keyBand } = parseBandKey(key);
+    const band = bandOverride || keyBand;
 
   let url = `${API}/image?filename=${encodeURIComponent(filename)}&band=${band}`;
 
@@ -1235,7 +1294,8 @@ useEffect(() => {
       let fileKey = selectedFile || rFile || activeFilesPool[0];
       if (!fileKey) return;
 
-      const { filename, band } = parseBandKey(fileKey);
+      const { filename, band: fileBand } = parseBandKey(fileKey);
+      const band = viewMode === "raster" && fileKey === selectedFile ? selectedRasterBand : fileBand;
 
       try {
         const res = await axios.get(`${API}/pixel-value`, {
@@ -1266,10 +1326,10 @@ useEffect(() => {
       clearTimeout(mouseInfoTimeoutRef.current);
     }
   };
-}, [isSwipeMode, osdReady, selectedFile, rFile, activeFilesPool]);
+}, [isSwipeMode, osdReady, selectedFile, selectedRasterBand, viewMode, rFile, activeFilesPool]);
 
-  const buildCompositeUrl = (r, g, b, stretch) => {
-    let url = `${API}/rgb-composite?r_file=${encodeURIComponent(r)}&g_file=${encodeURIComponent(g)}&b_file=${encodeURIComponent(b)}`;
+  const buildCompositeUrl = (r, g, b, stretch, bands = rgbBandValues) => {
+    let url = `${API}/rgb-composite?r_file=${encodeURIComponent(r)}&g_file=${encodeURIComponent(g)}&b_file=${encodeURIComponent(b)}&r_band=${bands.r}&g_band=${bands.g}&b_band=${bands.b}`;
     ["r", "g", "b"].forEach((ch) => {
       const s = stretch && stretch[ch];
       if (s && s.min !== "" && s.min != null) url += `&${ch}_min=${encodeURIComponent(s.min)}`;
@@ -1324,7 +1384,7 @@ useEffect(() => {
     setSelectedFile(file);
     setViewMode("raster");
     loadImage(
-      buildSingleImageUrl(file, nextStretch.default),
+      buildSingleImageUrl(file, nextStretch.default, file === selectedFile ? selectedRasterBand : null),
       rasterViewKey(file),
       true,                // preserveView
       currentViewport      // keep same zoom/pan
@@ -1431,7 +1491,7 @@ useEffect(() => {
       setSelectedFile(fileToRestore);
       setViewMode("raster");
       loadImage(
-        buildSingleImageUrl(fileToRestore, noStretch.default),
+        buildSingleImageUrl(fileToRestore, noStretch.default, fileToRestore === selectedFile ? selectedRasterBand : null),
         rasterViewKey(fileToRestore),
         true,
         currentViewport
@@ -1782,10 +1842,15 @@ const processUploadsToContainer = async (targetContainerName, filesToUpload) => 
 
   if (saved) {
     // ---------- INSTANT RESTORE ----------
+    const savedBand = saved.selectedRasterBand || 1;
+    selectedRasterBandRef.current = savedBand;
+    setSelectedRasterBand(savedBand);
     setViewMode(saved.viewMode || (saved.rFile && saved.gFile && saved.bFile ? "rgb" : "raster"));
     setRFile(saved.rFile || "");
     setGFile(saved.gFile || "");
     setBFile(saved.bFile || "");
+    const savedRgbBands = saved.rgbBandValues || { r: 1, g: 1, b: 1 };
+    setRgbBandValues(savedRgbBands);
     setStretchValues(cloneStretchValues(saved.stretchValues));
     setHistDropdownFile(saved.histDropdownFile || filename);
     setHistActiveChannel(saved.histActiveChannel || null);
@@ -1808,7 +1873,7 @@ const processUploadsToContainer = async (targetContainerName, filesToUpload) => 
       setSelectedFile(null);
       setViewMode("rgb");
       loadImage(
-        buildCompositeUrl(saved.rFile, saved.gFile, saved.bFile, saved.stretchValues),
+        buildCompositeUrl(saved.rFile, saved.gFile, saved.bFile, saved.stretchValues, savedRgbBands),
         compositeViewKey(saved.rFile, saved.gFile, saved.bFile),
         true,               // preserveView
         saved               // restore exact zoom + pan
@@ -1817,7 +1882,7 @@ const processUploadsToContainer = async (targetContainerName, filesToUpload) => 
       setSelectedFile(filename);
       setViewMode("raster");
       loadImage(
-        buildSingleImageUrl(filename, saved.stretchValues?.default || { min: "", max: "" }),
+        buildSingleImageUrl(filename, saved.stretchValues?.default || { min: "", max: "" }, savedBand),
         rasterViewKey(filename),
         true,               // preserveView
         saved
@@ -1834,6 +1899,8 @@ const processUploadsToContainer = async (targetContainerName, filesToUpload) => 
     } else {
     // First time opening this file → ALWAYS show low-res original first
     setSelectedFile(filename);
+    selectedRasterBandRef.current = 1;
+    setSelectedRasterBand(1);
     setViewMode("raster");
     setHistSelectedRange(null);
     setHistActiveChannel(null);
@@ -1864,13 +1931,14 @@ const processUploadsToContainer = async (targetContainerName, filesToUpload) => 
     setRFile("");
     setGFile("");
     setBFile("");
+    setRgbBandValues({ r: 1, g: 1, b: 1 });
     setHistR(null);
     setHistG(null);
     setHistB(null);
 
     // Start tiled viewer (high-res on demand) while keeping the low-res image visible
     loadImage(
-      buildSingleImageUrl(fullKey, restoredStretch.default),
+      buildSingleImageUrl(fullKey, restoredStretch.default, 1),
       rasterViewKey(fullKey),
       hasLocal          // ← keep low-res overview until first high-res tile arrives
     );
@@ -1891,6 +1959,62 @@ const processUploadsToContainer = async (targetContainerName, filesToUpload) => 
   } catch (err) {
     // ignore
   }
+};
+
+const handleRasterBandChange = (event) => {
+  const band = Number(event.target.value);
+  if (!bandSourceFile || !Number.isInteger(band) || band < 1) return;
+
+  saveCurrentImageHistory();
+  selectedRasterBandRef.current = band;
+  setSelectedRasterBand(band);
+  setSelectedFile(bandSourceFile);
+  setViewMode("raster");
+  setHistoryContext(getContainerForFile(bandSourceFile) || activeContainer, bandSourceFile);
+
+  let currentViewport = null;
+  if (viewerRef.current?.viewport) {
+    const viewport = viewerRef.current.viewport;
+    const center = viewport.getCenter();
+    currentViewport = { osdZoom: viewport.getZoom(), osdCenter: { x: center.x, y: center.y } };
+  }
+  loadImage(
+    buildSingleImageUrl(bandSourceFile, stretchValues.default, band),
+    rasterViewKey(bandSourceFile),
+    true,
+    currentViewport
+  );
+};
+
+const handleRgbBandChange = (channel, value) => {
+  const bands = { ...rgbBandValues, [channel]: Number(value) };
+  setRgbBandValues(bands);
+  if (rFile && gFile && bFile) {
+    loadImage(
+      buildCompositeUrl(rFile, gFile, bFile, stretchValues, bands),
+      compositeViewKey(rFile, gFile, bFile),
+      true
+    );
+  }
+};
+
+const applySelectedRasterRgb = () => {
+  const sourceFile = bandSourceFile || selectedFile || activeFilesPool[0];
+  if (!sourceFile || !rasterInfo?.bands) return;
+  const bands = Object.fromEntries(
+    Object.entries(rgbBandValues).map(([channel, band]) => [channel, Math.min(Math.max(1, band), rasterInfo.bands)])
+  );
+  setRgbBandValues(bands);
+  setRFile(sourceFile);
+  setGFile(sourceFile);
+  setBFile(sourceFile);
+  setSelectedFile(null);
+  setViewMode("rgb");
+  if (activeContainer) setRgbHistoryContext(activeContainer);
+  loadImage(
+    buildCompositeUrl(sourceFile, sourceFile, sourceFile, stretchValues, bands),
+    compositeViewKey(sourceFile, sourceFile, sourceFile)
+  );
 };
 
   const handleDeleteRaster = async (e, filename) => {
@@ -2066,6 +2190,8 @@ const handleRGBChange = (channel, value) => {
   if (channel === "r") { nextR = value; setRFile(value); }
   if (channel === "g") { nextG = value; setGFile(value); }
   if (channel === "b") { nextB = value; setBFile(value); }
+  const nextBands = { ...rgbBandValues, [channel]: 1 };
+  setRgbBandValues(nextBands);
 
   if (activeContainer) {
     containerRgbRef.current[activeContainer] = { r: nextR, g: nextG, b: nextB };
@@ -2081,7 +2207,7 @@ const handleRGBChange = (channel, value) => {
     const currentStretch = stretchValues;
 
     loadImage(
-      buildCompositeUrl(nextR, nextG, nextB, currentStretch),
+      buildCompositeUrl(nextR, nextG, nextB, currentStretch, nextBands),
       compositeViewKey(nextR, nextG, nextB),
       true,                 // preserve view
       currentViewport       // keep same zoom + pan
@@ -2155,10 +2281,12 @@ const handleRGBChange = (channel, value) => {
         );
       } else if (previousView?.selectedFile) {
         setSelectedFile(previousView.selectedFile);
+        selectedRasterBandRef.current = previousView.selectedRasterBand || 1;
+        setSelectedRasterBand(previousView.selectedRasterBand || 1);
         setViewMode("raster");
         setStretchValues(previousView.stretchValues);
         loadImage(
-          buildSingleImageUrl(previousView.selectedFile, previousView.stretchValues.default),
+          buildSingleImageUrl(previousView.selectedFile, previousView.stretchValues.default, previousView.selectedRasterBand || 1),
           rasterViewKey(previousView.selectedFile)
         );
       } else if (previousView?.displayedImageUrl) {
@@ -2173,7 +2301,7 @@ const handleRGBChange = (channel, value) => {
       return;
     }
     viewBeforeSwipeRef.current = {
-      selectedFile, viewMode, rFile, gFile, bFile,
+      selectedFile, selectedRasterBand, viewMode, rFile, gFile, bFile,
       stretchValues: cloneStretchValues(stretchValues),
       displayedImageUrl,
     };
@@ -2190,21 +2318,21 @@ const handleRGBChange = (channel, value) => {
   };
 
   useEffect(() => {
-    const handleWindowMouseMove = (e) => {
+    const handleWindowPointerMove = (e) => {
       if (!isDraggingSwipeDivider || !containerRef.current) return;
       const rect = containerRef.current.getBoundingClientRect();
       const x = e.clientX - rect.left;
       const percentage = Math.max(0, Math.min(100, (x / rect.width) * 100));
       setSwipePosition(percentage);
     };
-    const handleWindowMouseUp = () => setIsDraggingSwipeDivider(false);
+    const handleWindowPointerUp = () => setIsDraggingSwipeDivider(false);
     if (isDraggingSwipeDivider) {
-      window.addEventListener("mousemove", handleWindowMouseMove);
-      window.addEventListener("mouseup", handleWindowMouseUp);
+      window.addEventListener("pointermove", handleWindowPointerMove);
+      window.addEventListener("pointerup", handleWindowPointerUp);
     }
     return () => {
-      window.removeEventListener("mousemove", handleWindowMouseMove);
-      window.removeEventListener("mouseup", handleWindowMouseUp);
+      window.removeEventListener("pointermove", handleWindowPointerMove);
+      window.removeEventListener("pointerup", handleWindowPointerUp);
     };
   }, [isDraggingSwipeDivider]);
 
@@ -2263,6 +2391,35 @@ const handleRGBChange = (channel, value) => {
     };
   }, [histBoxDrag, histR, histG, histB, histDefaultData]);
 
+  const fetchRoiAnalysis = useCallback(async (selection) => {
+    if (!selection?.filename) return;
+    const key = selection.filename.includes("/") || !activeContainer
+      ? selection.filename
+      : `${activeContainer}/${selection.filename}`;
+    const filename = key.includes("::band") ? key.split("::band")[0] : key;
+    setIsRoiLoading(true);
+    setRoiAnalysis(null);
+    setRoiAiAnalysis("");
+    try {
+      const res = await axios.post(`${API}/roi-analysis`, {
+        filename,
+        x: selection.x,
+        y: selection.y,
+        width: selection.width,
+        height: selection.height,
+      });
+      setRoiAnalysis(res.data);
+      setSelectedRoiBand(1);
+    } catch (err) {
+      console.error("ROI analysis error:", err);
+      const message = err.response?.data?.detail || "Failed to analyze the selected ROI.";
+      setToast({ message, type: "error" });
+      window.setTimeout(() => setToast(null), 3500);
+    } finally {
+      setIsRoiLoading(false);
+    }
+  }, [activeContainer]);
+
   useEffect(() => {
     return () => {
       if (abortControllerRef.current) abortControllerRef.current.abort();
@@ -2273,6 +2430,139 @@ const handleRGBChange = (channel, value) => {
       }
     };
   }, []);
+
+  useEffect(() => {
+    setRoiSelection(null);
+    setRoiDraft(null);
+    setRoiScreenRect(null);
+    setRoiAnalysis(null);
+    setRoiAiAnalysis("");
+  }, [roiSourceFile]);
+
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    const surface = osdContainerRef.current;
+    if (!viewer || !surface || !osdReady || isSwipeMode) return;
+
+    viewer.setMouseNavEnabled(!isRoiDrawing);
+    surface.style.cursor = isRoiDrawing ? "crosshair" : "grab";
+    if (!isRoiDrawing) return;
+
+    const getImagePoint = (event) => {
+      const bounds = currentRasterSizeRef.current;
+      const rect = surface.getBoundingClientRect();
+      const localPoint = new OpenSeadragon.Point(event.clientX - rect.left, event.clientY - rect.top);
+      const imagePoint = viewer.viewport.viewerElementToImageCoordinates(localPoint);
+      return {
+        x: Math.max(0, Math.min(bounds.width, imagePoint.x)),
+        y: Math.max(0, Math.min(bounds.height, imagePoint.y)),
+      };
+    };
+
+    const drawDraft = (point) => {
+      const start = roiDragRef.current.start;
+      if (!start) return;
+      const rect = {
+        x: Math.min(start.x, point.x),
+        y: Math.min(start.y, point.y),
+        width: Math.abs(point.x - start.x),
+        height: Math.abs(point.y - start.y),
+      };
+      setRoiDraft(rect);
+      const topLeft = viewer.viewport.imageToViewerElementCoordinates(new OpenSeadragon.Point(rect.x, rect.y));
+      const bottomRight = viewer.viewport.imageToViewerElementCoordinates(new OpenSeadragon.Point(rect.x + rect.width, rect.y + rect.height));
+      setRoiScreenRect({ left: topLeft.x, top: topLeft.y, width: bottomRight.x - topLeft.x, height: bottomRight.y - topLeft.y });
+    };
+
+    const handlePointerDown = (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      const point = getImagePoint(event);
+      roiDragRef.current = { start: point, pointerId: event.pointerId };
+      surface.setPointerCapture?.(event.pointerId);
+      drawDraft(point);
+    };
+    const handlePointerMove = (event) => {
+      if (roiDragRef.current.pointerId !== event.pointerId) return;
+      event.preventDefault();
+      event.stopPropagation();
+      drawDraft(getImagePoint(event));
+    };
+    const handlePointerUp = (event) => {
+      if (roiDragRef.current.pointerId !== event.pointerId) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const start = roiDragRef.current.start;
+      const point = getImagePoint(event);
+      roiDragRef.current = { start: null, pointerId: null };
+      surface.releasePointerCapture?.(event.pointerId);
+      setRoiDraft(null);
+      setIsRoiDrawing(false);
+
+      const bounds = currentRasterSizeRef.current;
+      const x = Math.max(0, Math.floor(Math.min(start.x, point.x)));
+      const y = Math.max(0, Math.floor(Math.min(start.y, point.y)));
+      const right = Math.min(bounds.width, Math.ceil(Math.max(start.x, point.x)));
+      const bottom = Math.min(bounds.height, Math.ceil(Math.max(start.y, point.y)));
+      if (right <= x || bottom <= y || !roiSourceFile) {
+        setRoiScreenRect(null);
+        showToast("Drag across the image to select an ROI.", "error");
+        return;
+      }
+
+      const selection = { filename: roiSourceFile, x, y, width: right - x, height: bottom - y };
+      setRoiSelection(selection);
+      setShowRoiPanel(true);
+      setRoiAiAnalysis("");
+      const topLeft = viewer.viewport.imageToViewerElementCoordinates(new OpenSeadragon.Point(x, y));
+      const bottomRight = viewer.viewport.imageToViewerElementCoordinates(new OpenSeadragon.Point(right, bottom));
+      setRoiScreenRect({ left: topLeft.x, top: topLeft.y, width: bottomRight.x - topLeft.x, height: bottomRight.y - topLeft.y });
+      fetchRoiAnalysis(selection);
+    };
+    const handlePointerCancel = () => {
+      roiDragRef.current = { start: null, pointerId: null };
+      setRoiDraft(null);
+      setRoiScreenRect(null);
+      setIsRoiDrawing(false);
+    };
+
+    surface.addEventListener("pointerdown", handlePointerDown, true);
+    surface.addEventListener("pointermove", handlePointerMove, true);
+    surface.addEventListener("pointerup", handlePointerUp, true);
+    surface.addEventListener("pointercancel", handlePointerCancel, true);
+    return () => {
+      surface.removeEventListener("pointerdown", handlePointerDown, true);
+      surface.removeEventListener("pointermove", handlePointerMove, true);
+      surface.removeEventListener("pointerup", handlePointerUp, true);
+      surface.removeEventListener("pointercancel", handlePointerCancel, true);
+      if (viewerRef.current === viewer) viewer.setMouseNavEnabled(true);
+      surface.style.cursor = "grab";
+    };
+  }, [isRoiDrawing, isSwipeMode, osdReady, roiSourceFile, fetchRoiAnalysis]);
+
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || !osdReady) return;
+    const updateOverlay = () => {
+      const rect = roiDraft || roiSelection;
+      if (!rect) {
+        setRoiScreenRect(null);
+        return;
+      }
+      const topLeft = viewer.viewport.imageToViewerElementCoordinates(new OpenSeadragon.Point(rect.x, rect.y));
+      const bottomRight = viewer.viewport.imageToViewerElementCoordinates(new OpenSeadragon.Point(rect.x + rect.width, rect.y + rect.height));
+      setRoiScreenRect({ left: topLeft.x, top: topLeft.y, width: bottomRight.x - topLeft.x, height: bottomRight.y - topLeft.y });
+    };
+    viewer.addHandler("viewport-change", updateOverlay);
+    viewer.addHandler("animation-finish", updateOverlay);
+    updateOverlay();
+    return () => {
+      viewer.removeHandler("viewport-change", updateOverlay);
+      viewer.removeHandler("animation-finish", updateOverlay);
+    };
+  }, [osdReady, roiDraft, roiSelection]);
 
   useEffect(() => {
   if (!isProfileMode || isSwipeMode) return;
@@ -2351,6 +2641,7 @@ const handleRGBChange = (channel, value) => {
     setShowHistogram(true);
     setShowScatterPlot(false);
     setShowProfileModal(false);
+    setShowRoiPanel(false);
     setIsProfileMode(false);
   };
 
@@ -2378,10 +2669,13 @@ const handleRGBChange = (channel, value) => {
     setScatterYFile(defaultYFile);
     setScatterXBand(1);
     setScatterYBand(1);
+    setScatterError("");
+    setScatterData(null);
 
     setShowHistogram(false);
     setShowScatterPlot(true);
     setShowProfileModal(false);
+    setShowRoiPanel(false);
     setIsProfileMode(false);
 
     fetchScatterPlotData(defaultXFile, 1, defaultYFile, 1);
@@ -2389,20 +2683,24 @@ const handleRGBChange = (channel, value) => {
 
   const fetchScatterPlotData = async (xFile, xBand, yFile, yBand) => {
     if (!xFile || !yFile) return;
+    const xFilename = parseBandKey(getFullKey(xFile)).filename;
+    const yFilename = parseBandKey(getFullKey(yFile)).filename;
+    const requestId = ++scatterRequestRef.current;
     setIsScatterLoading(true);
+    setScatterError("");
+    setScatterData(null);
     try {
       const res = await axios.get(`${API}/scatter-plot`, {
-        params: { filename: xFile, x_band: xBand, y_file: yFile, y_band: yBand },
+        params: { filename: xFilename, x_band: xBand, y_file: yFilename, y_band: yBand },
       });
-      setScatterData(res.data);
+      if (requestId === scatterRequestRef.current) setScatterData(res.data);
     } catch (err) {
       console.error("Scatter plot error:", err);
-      setScatterData({
-        points: Array.from({ length: 50 }, () => ({ x: Math.random() * 255, y: Math.random() * 255 })),
-        xMin: 0, xMax: 255, yMin: 0, yMax: 255,
-      });
+      if (requestId === scatterRequestRef.current) {
+        setScatterError(err.response?.data?.detail || "Could not calculate this band comparison.");
+      }
     } finally {
-      setIsScatterLoading(false);
+      if (requestId === scatterRequestRef.current) setIsScatterLoading(false);
     }
   };
 
@@ -2416,29 +2714,51 @@ const handleRGBChange = (channel, value) => {
   setSelectedProfileBand(1);
   setProfileStart(null);
   setProfileEnd(null);
+  setProfileData(null);
+  setProfileError("");
 
   setShowHistogram(false);
   setShowScatterPlot(false);
   setShowProfileModal(false);
+  setShowRoiPanel(false);
   setIsProfileMode(true);
+  setShowProfileModal(true);
 
   showToast("Click two points on the image to draw the profile line.", "success");
 };
 
   const fetchProfilePlot = async (pStart, pEnd, filename, band = 1) => {
     if (!filename || !pStart || !pEnd) return;
+    const sourceFilename = parseBandKey(getFullKey(filename)).filename;
     setIsProfileLoading(true);
+    setProfileError("");
     setShowProfileModal(true);
     try {
       const res = await axios.get(`${API}/profile-plot`, {
-        params: { filename, x0: pStart.x, y0: pStart.y, x1: pEnd.x, y1: pEnd.y, band },
+        params: { filename: sourceFilename, x0: pStart.x, y0: pStart.y, x1: pEnd.x, y1: pEnd.y, band },
       });
       setProfileData(res.data);
     } catch (err) {
       console.error("Profile plot error:", err);
+      setProfileError(err.response?.data?.detail || "Could not sample the selected profile line.");
       showToast("Failed to fetch profile data.", "error");
     } finally {
       setIsProfileLoading(false);
+    }
+  };
+
+  const analyzeRoiWithAi = async () => {
+    if (!roiAnalysis) return;
+    setIsRoiAiLoading(true);
+    setRoiAiAnalysis("");
+    try {
+      const res = await axios.post(`${API}/roi-ai-analysis`, roiAnalysis);
+      setRoiAiAnalysis(res.data.analysis || "No AI analysis was returned.");
+    } catch (err) {
+      const message = err.response?.data?.detail || "AI analysis failed.";
+      setRoiAiAnalysis(message);
+    } finally {
+      setIsRoiAiLoading(false);
     }
   };
 
@@ -2478,16 +2798,32 @@ const handleRGBChange = (channel, value) => {
   );
 
   const renderHistogramBlock = (channelKey, color, label, file, data, loading) => {
-    if (loading) return <div style={{ textAlign: "center", padding: "20px", color: "#94a3b8", fontSize: "12px" }}>Loading chart...</div>;
-    if (!data) return <div style={{ color: "#64748b", fontSize: "11px", fontStyle: "italic" }}>No histogram data for {label} yet.</div>;
+    if (loading) return <div className="histogram-loading"><span className="histogram-spinner" />Loading histogram data</div>;
+    if (!data) return <div className="histogram-empty">No histogram data for {label}.</div>;
     const stretch = stretchValues[channelKey] || { min: "", max: "" };
+    const countMax = Math.max(1, ...data.counts);
+    const sampleCount = data.counts.reduce((sum, count) => sum + count, 0);
+    const valueRange = data.max - data.min || 1;
+    const meanPosition = Math.max(0, Math.min(100, ((data.mean - data.min) / valueRange) * 100));
 
     return (
-      <div>
-        <div style={{ fontSize: "11px", color, fontWeight: 700, marginBottom: "8px" }}>{label} — {getDisplayName(file)}</div>
-        <div style={{ fontSize: "10px", color: "#64748b", marginBottom: "6px", fontStyle: "italic" }}>Drag a box across the chart to stretch to that range</div>
+      <div className="histogram-card">
+        <div className="histogram-card-header">
+          <div style={{ minWidth: 0 }}>
+            <div className="histogram-kicker">{channelKey === "default" ? "RASTER BAND" : "RGB CHANNEL"}</div>
+            <div className="histogram-series-name">{label}</div>
+            <div className="histogram-source" title={getDisplayName(file)}>{getDisplayName(file)}</div>
+          </div>
+          <span className="histogram-swatch" style={{ background: color }} />
+        </div>
+        <div className="histogram-summary">
+          <div><span>Samples</span><strong>{sampleCount.toLocaleString()}</strong></div>
+          <div><span>Mean</span><strong>{data.mean.toFixed(2)}</strong></div>
+          <div><span>Std dev</span><strong>{data.std.toFixed(2)}</strong></div>
+        </div>
         <div
-          style={{ position: "relative", userSelect: "none" }}
+          className="histogram-plot"
+          style={{ "--histogram-color": color, userSelect: "none" }}
           onMouseDown={(e) => {
             if (!file) return;
             e.preventDefault();
@@ -2496,16 +2832,16 @@ const handleRGBChange = (channel, value) => {
             setHistBoxDrag({ channel: channelKey, file, rectLeft: rect.left, rectWidth: rect.width, startX, currentX: startX });
           }}
         >
-          <div style={{ display: "flex", alignItems: "flex-end", height: "90px", gap: "2px", borderBottom: "1px solid #2a2d34", paddingBottom: "2px", marginBottom: "6px", cursor: file ? "crosshair" : "default" }}>
+          <div className="histogram-bars" style={{ cursor: file ? "crosshair" : "default" }}>
             {data.counts.map((count, idx) => {
-              const max = Math.max(...data.counts, 1);
-              const pct = Math.max(Math.round((count / max) * 100), 2);
+              const pct = Math.max((count / countMax) * 100, 1.5);
               return (
-                <div key={idx} title={`Count: ${count}`} style={{ flex: 1, height: "100%", display: "flex", alignItems: "flex-end", pointerEvents: "none" }}>
-                  <div style={{ width: "100%", height: `${pct}%`, backgroundColor: color, borderRadius: "1px 1px 0 0" }} />
+                <div key={idx} title={`Bin ${idx + 1}: ${count.toLocaleString()} pixels`} className="histogram-bar-column">
+                  <div className="histogram-bar" style={{ height: `${pct}%` }} />
                 </div>
               );
             })}
+            <div className="histogram-mean-marker" style={{ left: `${meanPosition}%` }} title={`Mean: ${data.mean.toFixed(2)}`} />
           </div>
           {(() => {
             const range = data.max - data.min || 1;
@@ -2524,38 +2860,32 @@ const handleRGBChange = (channel, value) => {
             return (
               <div
                 style={{
-                  position: "absolute", top: 0, height: "90px",
+                  position: "absolute", top: "10px", bottom: "22px",
                   left: `${Math.max(0, Math.min(100, leftPct))}%`,
                   width: `${Math.max(0.5, Math.min(100 - Math.max(0, leftPct), widthPct))}%`,
-                  background: "rgba(59,130,246,0.18)",
-                  border: "2px solid rgba(59,130,246,0.9)",
-                  borderRadius: "3px",
+                  background: "rgba(241, 196, 95, 0.12)",
+                  borderLeft: "1px solid #f1c45f",
+                  borderRight: "1px solid #f1c45f",
                   pointerEvents: "none",
                 }}
               />
             );
           })()}
         </div>
-        <div style={{ display: "flex", justifyContent: "space-between", fontSize: "10px", color: "#64748b", marginBottom: "10px" }}>
-          <span>{data.min.toFixed(1)}</span><span>{data.max.toFixed(1)}</span>
+        <div className="histogram-axis">
+          <span>{data.min.toPrecision(5)}</span><span>{(data.min + valueRange / 2).toPrecision(5)}</span><span>{data.max.toPrecision(5)}</span>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "5px", fontSize: "10px", color: "#94a3b8", background: "#14171d", padding: "6px 8px", borderRadius: "4px", border: "1px solid #1e222d" }}>
-          <div>Min: {data.min.toFixed(2)}</div>
-          <div>Max: {data.max.toFixed(2)}</div>
-          <div>Mean: {data.mean.toFixed(2)}</div>
-          <div>Std Dev: {data.std.toFixed(2)}</div>
-        </div>
-        <div style={{ marginTop: "10px", padding: "8px", background: "#0b0d11", borderRadius: "5px", border: "1px solid #1e222d" }}>
-          <div style={{ fontSize: "10px", color: "#94a3b8", marginBottom: "6px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.03em" }}>Linear Contrast Stretch</div>
-          <div style={{ display: "flex", gap: "6px", marginBottom: "8px" }}>
-            <input type="number" placeholder={`Min (${data.min.toFixed(1)})`} value={stretch.min} onChange={(e) => updateStretchInput(channelKey, "min", e.target.value)} style={styles.stretchInput} />
-            <input type="number" placeholder={`Max (${data.max.toFixed(1)})`} value={stretch.max} onChange={(e) => updateStretchInput(channelKey, "max", e.target.value)} style={styles.stretchInput} />
+        <div className="histogram-stretch-panel">
+          <div className="histogram-stretch-heading">Linear contrast stretch</div>
+          <div className="histogram-stretch-fields">
+            <label><span>Minimum</span><input type="number" placeholder={data.min.toPrecision(5)} value={stretch.min} onChange={(e) => updateStretchInput(channelKey, "min", e.target.value)} /></label>
+            <label><span>Maximum</span><input type="number" placeholder={data.max.toPrecision(5)} value={stretch.max} onChange={(e) => updateStretchInput(channelKey, "max", e.target.value)} /></label>
           </div>
-          <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-            <button style={styles.stretchBtn} onClick={() => applyAutoStretch(channelKey, 2, 98)} title="Auto 2–98%">Auto 2–98%</button>
-            <button style={styles.stretchBtn} onClick={() => applyAutoStretch(channelKey, 0, 100)} title="Min–Max">Min–Max</button>
-            <button style={{ ...styles.stretchBtn, background: "#2563eb", borderColor: "#2563eb" }} onClick={() => applyStretch(channelKey)}>Apply</button>
-            <button style={{ ...styles.stretchBtn, color: "#f87171" }} onClick={() => resetStretch(channelKey)} title="Remove stretch">Reset</button>
+          <div className="histogram-stretch-actions">
+            <button onClick={() => applyAutoStretch(channelKey, 2, 98)} title="Auto 2–98%">Auto 2–98%</button>
+            <button onClick={() => applyAutoStretch(channelKey, 0, 100)} title="Min–Max">Min–Max</button>
+            <button className="histogram-apply-stretch" onClick={() => applyStretch(channelKey)}>Apply</button>
+            <button className="histogram-reset-stretch" onClick={() => resetStretch(channelKey)} title="Remove stretch">Reset</button>
           </div>
           {(stretch.min !== "" || stretch.max !== "") && (
             <div style={{ fontSize: "10px", color: "#38bdf8", marginTop: "6px" }}>
@@ -2758,8 +3088,12 @@ const handleRGBChange = (channel, value) => {
   return (
     <div
       key={filePath}
-      onClick={() => {
+      onClick={(event) => {
         console.log("CLICKED:", filePath);
+        setShowBandControls(false);
+        const alreadyShowingRaster = viewMode === "raster" && selectedFile === filePath;
+        const alreadyShowingComposite = viewMode === "rgb" && rFile === filePath && gFile === filePath && bFile === filePath;
+        if (event.detail > 1 || alreadyShowingRaster || alreadyShowingComposite) return;
 
         // Force loading state immediately
         setIsImageLoading(true);
@@ -2770,6 +3104,7 @@ const handleRGBChange = (channel, value) => {
         // Call the real function
         handleSelectRaster(filePath);
       }}
+      onDoubleClick={() => setShowBandControls(true)}
       style={{
         padding: "10px 12px",
         marginBottom: "6px",
@@ -2828,6 +3163,37 @@ const handleRGBChange = (channel, value) => {
             })
           )}
         </div>
+        {showBandControls && bandSourceFile && rasterInfo?.bands > 1 && (
+          <section className="band-control-panel">
+            <div className="band-source-summary">
+              <div className="band-source-kicker">ACTIVE RASTER</div>
+              <div title={getDisplayName(bandSourceFile)} className="band-source-name">{getDisplayName(bandSourceFile)}</div>
+              <div className="band-source-container">Container <strong>{getContainerForFile(bandSourceFile) || activeContainer || "—"}</strong></div>
+            </div>
+            <div className="band-control-heading">
+              <span>Band controls</span>
+              <span className="band-count">{rasterInfo.bands} bands</span>
+            </div>
+            <label className="band-control-row band-display-row">
+              <span>Display</span>
+              <select aria-label="Displayed raster band" value={selectedRasterBand} onChange={handleRasterBandChange} className="band-select">
+                {Array.from({ length: rasterInfo.bands }, (_, index) => <option key={index + 1} value={index + 1}>Band {index + 1}</option>)}
+              </select>
+            </label>
+            <div className="rgb-band-group">
+              <div className="rgb-band-heading">RGB composite</div>
+              {[{ channel: "r", label: "Red", color: "#f07878" }, { channel: "g", label: "Green", color: "#69c99a" }, { channel: "b", label: "Blue", color: "#75a9ed" }].map(({ channel, label, color }) => (
+                <label key={channel} className="band-control-row">
+                  <span className="band-channel-label" style={{ color }}><span className={`channel-dot channel-${channel}`} />{label}</span>
+                  <select aria-label={`${label} channel band`} value={rgbBandValues[channel]} onChange={(event) => handleRgbBandChange(channel, event.target.value)} className="band-select">
+                  {Array.from({ length: rasterInfo.bands }, (_, index) => <option key={index + 1} value={index + 1}>Band {index + 1}</option>)}
+                  </select>
+                </label>
+              ))}
+              <button className="band-apply-button" onClick={applySelectedRasterRgb}>Apply RGB composite</button>
+            </div>
+          </section>
+        )}
       </div>
 
       <div style={styles.mainContent}>
@@ -2855,6 +3221,7 @@ const handleRGBChange = (channel, value) => {
               <button style={{ ...styles.iconBtn, opacity: activeFilesPool.length > 0 && !isSwipeMode ? 1 : 0.4 }} onClick={openHistogramModal} disabled={activeFilesPool.length === 0 || isSwipeMode}>📊 Histogram</button>
               <button style={{ ...styles.iconBtn, opacity: activeFilesPool.length > 0 && !isSwipeMode ? 1 : 0.4 }} onClick={openScatterPlotModal} disabled={activeFilesPool.length === 0 || isSwipeMode}>📈 Scatter Plot</button>
               <button style={{ ...styles.iconBtn, background: isProfileMode ? "#0d9488" : "#1e222d", opacity: activeFilesPool.length > 0 && !isSwipeMode ? 1 : 0.4 }} onClick={() => { if (activeFilesPool.length === 0 || isSwipeMode) return; if (isProfileMode) { setIsProfileMode(false); showToast("Profile mode canceled", "success"); } else { openProfilePlotModal(); } }} disabled={activeFilesPool.length === 0 || isSwipeMode}>📉 Profile Plot</button>
+              <button style={{ ...styles.iconBtn, background: isRoiDrawing ? "#0e7490" : "#1e222d", opacity: activeFilesPool.length > 0 && !isSwipeMode ? 1 : 0.4 }} onClick={() => { if (!roiSourceFile || isSwipeMode) return; setIsProfileMode(false); setShowHistogram(false); setShowScatterPlot(false); setShowProfileModal(false); setShowRoiPanel(true); setIsRoiDrawing((active) => !active); }} disabled={activeFilesPool.length === 0 || isSwipeMode}>▧ ROI Rectangle</button>
             </div>
           </div>
           <div style={styles.divider} />
@@ -2897,22 +3264,24 @@ const handleRGBChange = (channel, value) => {
         </div>
 
         {isSwipeMode && (
-          <div style={styles.metaStrip}>
-            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-              <span style={{ color: "#38bdf8", fontWeight: 600 }}>Left Layer:</span>
-              <select value={swipeLeftFile} onChange={(e) => { setSwipeLeftLoading(true); setSwipeLeftFile(e.target.value); }} style={styles.selectInput}>
+          <div className="swipe-toolbar">
+            <label className="swipe-layer-control"><span className="swipe-layer-label swipe-left-label">Left layer</span>
+              <select aria-label="Left comparison layer" value={swipeLeftFile} onChange={(e) => { setSwipeLeftLoading(true); setSwipeLeftFile(e.target.value); }}>
                 {activeFilesPool.map((f) => <option key={`sw-l-${f}`} value={f}>{getDisplayName(f)}</option>)}
               </select>
               {swipeLeftLoading && <span style={styles.inlineSpinner} />}
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-              <span style={{ color: "#38bdf8", fontWeight: 600 }}>Right Layer:</span>
-              <select value={swipeRightFile} onChange={(e) => { setSwipeRightLoading(true); setSwipeRightFile(e.target.value); }} style={styles.selectInput}>
+            </label>
+            <label className="swipe-layer-control"><span className="swipe-layer-label swipe-right-label">Right layer</span>
+              <select aria-label="Right comparison layer" value={swipeRightFile} onChange={(e) => { setSwipeRightLoading(true); setSwipeRightFile(e.target.value); }}>
                 {activeFilesPool.map((f) => <option key={`sw-r-${f}`} value={f}>{getDisplayName(f)}</option>)}
               </select>
               {swipeRightLoading && <span style={styles.inlineSpinner} />}
+            </label>
+            <div className="swipe-toolbar-actions">
+              <span className="swipe-zoom-value">Zoom <strong>{Math.round(scale * 100)}%</strong></span>
+              <button title="Swap comparison layers" onClick={() => { setSwipeLeftLoading(true); setSwipeRightLoading(true); setSwipeLeftFile(swipeRightFile); setSwipeRightFile(swipeLeftFile); setSwipePosition(100 - swipePosition); }}>Swap</button>
+              <button title="Center comparison divider" onClick={() => setSwipePosition(50)}>Center</button>
             </div>
-            <span><strong>Zoom:</strong> {Math.round(scale * 100)}%</span>
           </div>
         )}
 
@@ -2937,8 +3306,32 @@ const handleRGBChange = (channel, value) => {
                   <img src={`${API}/image?filename=${encodeURIComponent(swipeLeftFile)}`} alt="Left Layer" draggable={false} style={getImageStyle} onLoad={() => setSwipeLeftLoading(false)} onError={() => setSwipeLeftLoading(false)} />
                 </div>
               </div>
-              <div onMouseDown={(e) => { e.stopPropagation(); setIsDraggingSwipeDivider(true); }} style={{ position: "absolute", top: 0, bottom: 0, left: `${swipePosition}%`, width: "4px", backgroundColor: "#38bdf8", cursor: "ew-resize", transform: "translateX(-50%)", zIndex: 5, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                <div style={{ width: "24px", height: "24px", borderRadius: "50%", backgroundColor: "#38bdf8", color: "#0b0d11", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "10px", fontWeight: "bold", boxShadow: "0 2px 6px rgba(0,0,0,0.5)" }}>↔</div>
+              <div className="swipe-layer-tag swipe-tag-left">A · {getDisplayName(swipeLeftFile)}</div>
+              <div className="swipe-layer-tag swipe-tag-right">B · {getDisplayName(swipeRightFile)}</div>
+              <div
+                className="swipe-divider"
+                role="slider"
+                tabIndex={0}
+                aria-label="Swipe comparison position"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round(swipePosition)}
+                onPointerDown={(event) => {
+                  if (event.button !== 0) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  event.currentTarget.setPointerCapture?.(event.pointerId);
+                  setIsDraggingSwipeDivider(true);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "ArrowLeft" || event.key === "ArrowDown") { event.preventDefault(); setSwipePosition((value) => Math.max(0, value - 2)); }
+                  if (event.key === "ArrowRight" || event.key === "ArrowUp") { event.preventDefault(); setSwipePosition((value) => Math.min(100, value + 2)); }
+                  if (event.key === "Home") { event.preventDefault(); setSwipePosition(0); }
+                  if (event.key === "End") { event.preventDefault(); setSwipePosition(100); }
+                }}
+                style={{ left: `${swipePosition}%` }}
+              >
+                <div className="swipe-divider-handle">↔</div>
               </div>
             </div>
           ) : (
@@ -2983,6 +3376,9 @@ const handleRGBChange = (channel, value) => {
                 ref={osdContainerRef}
                 style={{ position: "absolute", inset: 0, background: "transparent", zIndex: 20, cursor: "grab", touchAction: "none", pointerEvents: "auto" }}
               />
+              {roiScreenRect && (roiSelection?.filename === roiSourceFile || roiDraft) && (
+                <div style={{ position: "absolute", left: roiScreenRect.left, top: roiScreenRect.top, width: Math.max(1, roiScreenRect.width), height: Math.max(1, roiScreenRect.height), border: roiDraft ? "2px dashed #facc15" : "2px solid #facc15", background: "rgba(250,204,21,0.12)", boxShadow: "0 0 0 1px rgba(0,0,0,0.7)", pointerEvents: "none", zIndex: 26 }} />
+              )}
             </>
           )}
           {isImageLoading && !isSwipeMode && (
@@ -3039,6 +3435,27 @@ const handleRGBChange = (channel, value) => {
       }}
       draggable={false}
     />
+
+    {roiSelection?.filename === roiSourceFile && (() => {
+      const { width: rasterWidth, height: rasterHeight } = currentRasterSizeRef.current;
+      if (!rasterWidth || !rasterHeight) return null;
+      const rasterAspect = rasterWidth / rasterHeight;
+      const containerAspect = 280 / 200;
+      let left = roiSelection.x / rasterWidth;
+      let top = roiSelection.y / rasterHeight;
+      let width = roiSelection.width / rasterWidth;
+      let height = roiSelection.height / rasterHeight;
+      if (rasterAspect > containerAspect) {
+        const ratio = containerAspect / rasterAspect;
+        top = (1 - ratio) / 2 + top * ratio;
+        height *= ratio;
+      } else {
+        const ratio = rasterAspect / containerAspect;
+        left = (1 - ratio) / 2 + left * ratio;
+        width *= ratio;
+      }
+      return <div style={{ position: "absolute", left: `${left * 100}%`, top: `${top * 100}%`, width: `${width * 100}%`, height: `${height * 100}%`, border: "2px solid #facc15", background: "rgba(250,204,21,0.22)", boxSizing: "border-box", pointerEvents: "none", zIndex: 6 }} />;
+    })()}
 
     {/* Blue box – keep the aspect-ratio corrected version you already have */}
     {(() => {
@@ -3109,31 +3526,40 @@ const handleRGBChange = (channel, value) => {
       )}
 
       {showHistogram && (
-        <div style={styles.histPanel}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
-            <h3 style={{ margin: 0, fontSize: "14px", color: "#f8fafc" }}>Pixel Distribution (Histogram)</h3>
-            <button style={{ background: "none", border: "none", color: "#94a3b8", cursor: "pointer", fontSize: "16px" }} onClick={closeHistogramAndRestore}>✕</button>
+        <div className="histogram-panel" style={{ ...styles.histPanel, width: "min(420px, calc(100vw - 16px))" }}>
+          <div className="histogram-panel-header">
+            <div>
+              <div className="histogram-kicker">RASTER ANALYSIS</div>
+              <h3>Histogram</h3>
+            </div>
+            <button className="histogram-close" aria-label="Close histogram" onClick={closeHistogramAndRestore}>×</button>
           </div>
-          <div style={{ fontSize: "11px", color: "#64748b", marginBottom: "10px" }}>
-            Container: <strong style={{ color: "#38bdf8" }}>{activeContainer || "None"}</strong>
+          <div className="histogram-source-picker">
+            <label htmlFor="histogram-source">Source raster</label>
+            <select id="histogram-source" value={histDropdownFile} onChange={(event) => {
+              const file = event.target.value;
+              setHistDropdownFile(file);
+              setHistDefaultData(null);
+              setHistSelectedRange(null);
+              fetchHistogramFor(file, setHistDefaultLoading, setHistDefaultData);
+            }}>
+              {activeFilesPool.map((file) => <option key={file} value={file}>{getDisplayName(file)}</option>)}
+            </select>
           </div>
-          <div style={{ display: "flex", gap: "8px", marginBottom: "16px" }}>
-            {[{ ch: "r", color: "#ef4444", file: rFile }, { ch: "g", color: "#22c55e", file: gFile }, { ch: "b", color: "#3b82f6", file: bFile }].map(({ ch, color, file }) => (
-              <div key={ch} style={{ flex: 1, textAlign: "center" }}>
-                <button onClick={() => selectHistChannel(ch)} style={{ width: "100%", padding: "8px", borderRadius: "6px", fontWeight: 700, fontSize: "13px", cursor: "pointer", background: histActiveChannel === ch ? color : "#1e222d", color: histActiveChannel === ch ? "#0b0d11" : color, border: `1px solid ${color}` }}>
-                  {ch.toUpperCase()}
-                </button>
-                <div style={{ fontSize: "9px", color: "#64748b", marginTop: "4px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {file ? getDisplayName(file) : "—"}
-                </div>
-              </div>
+          <div className="histogram-scope">Container <strong>{activeContainer || "None"}</strong></div>
+          <div className="histogram-channel-tabs" role="tablist" aria-label="Histogram channel">
+            <button role="tab" aria-selected={histActiveChannel === null} className={histActiveChannel === null ? "is-active" : ""} onClick={() => {
+              setHistActiveChannel(null);
+              fetchHistogramFor(histDropdownFile, setHistDefaultLoading, setHistDefaultData);
+            }}>Raster</button>
+            {[{ ch: "r", label: "Red", color: "#e77e7e", file: rFile }, { ch: "g", label: "Green", color: "#68bd91", file: gFile }, { ch: "b", label: "Blue", color: "#729fe0", file: bFile }].map(({ ch, label, color, file }) => (
+              <button key={ch} role="tab" aria-selected={histActiveChannel === ch} className={histActiveChannel === ch ? "is-active" : ""} style={{ "--hist-channel": color }} disabled={!file} onClick={() => selectHistChannel(ch)}>{label}</button>
             ))}
           </div>
           {histSelectedRange && typeof histSelectedRange.min === "number" && typeof histSelectedRange.max === "number" && (
-            <div style={{ fontSize: "11px", color: "#a5b4fc", marginBottom: "14px", padding: "10px", background: "rgba(59,130,246,0.08)", borderRadius: "6px", border: "1px solid rgba(59,130,246,0.18)" }}>
-              Selected range: <strong>{histSelectedRange.channel === "default" ? "Selected Image" : histSelectedRange.channel.toUpperCase()}</strong> on <strong>{getDisplayName(histSelectedRange.filename)}</strong>
-              <br />
-              Values: {histSelectedRange.min.toFixed(2)} – {histSelectedRange.max.toFixed(2)}
+            <div className="histogram-range-summary">
+              <div><span>Active display range</span><button onClick={() => { setHistSelectedRange(null); setHistSelectedChannel(null); }}>Clear</button></div>
+              <strong>{histSelectedRange.min.toPrecision(5)} to {histSelectedRange.max.toPrecision(5)}</strong>
             </div>
           )}
           {histActiveChannel === null && renderHistogramBlock("default", "#38bdf8", "Selected Image", histDropdownFile, histDefaultData, histDefaultLoading)}
@@ -3144,95 +3570,229 @@ const handleRGBChange = (channel, value) => {
       )}
 
       {showScatterPlot && (
-        <div style={{ ...styles.sidePanel, right: showHistogram ? "360px" : 0 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
-            <h3 style={{ margin: 0, fontSize: "14px", color: "#f8fafc" }}>Band Scatter Plot Correlation</h3>
-            <button style={{ background: "none", border: "none", color: "#94a3b8", cursor: "pointer" }} onClick={() => setShowScatterPlot(false)}>✕</button>
+        <div className="analysis-panel" style={styles.sidePanel}>
+          <div className="analysis-panel-header">
+            <div><div className="analysis-kicker">BAND RELATIONSHIP</div><h3>Scatter plot</h3></div>
+            <button className="analysis-close" aria-label="Close scatter plot" onClick={() => setShowScatterPlot(false)}>×</button>
           </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: "10px", marginBottom: "16px" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-              <label style={{ fontSize: "11px", color: "#94a3b8", width: "50px" }}>X-Axis:</label>
-              <select value={scatterXFile} onChange={(e) => { const f = e.target.value; setScatterXFile(f); fetchScatterPlotData(f, scatterXBand, scatterYFile, scatterYBand); }} style={{ ...styles.selectInput, flex: 1 }}>
-                {activeFilesPool.map((f) => <option key={`sx-${f}`} value={f}>{getDisplayName(f)}</option>)}
-              </select>
-              <select value={scatterXBand} onChange={(e) => { const b = Number(e.target.value); setScatterXBand(b); fetchScatterPlotData(scatterXFile, b, scatterYFile, scatterYBand); }} style={styles.selectInput}>
-                <option value={1}>Band 1</option>
-              </select>
-              {isScatterLoading && <span style={styles.inlineSpinner} />}
+          <div className="scatter-config">
+            <div className="scatter-axis-config">
+              <span className="scatter-axis-badge scatter-x-badge">X</span>
+              <div className="scatter-axis-fields">
+                <select aria-label="X axis raster" value={scatterXFile} onChange={(event) => {
+                  const file = event.target.value;
+                  setScatterXFile(file);
+                  setScatterXBand(1);
+                  fetchScatterPlotData(file, 1, scatterYFile, scatterYBand);
+                }}>
+                  {activeFilesPool.map((file) => <option key={`sx-${file}`} value={file}>{getDisplayName(file)}</option>)}
+                </select>
+                <select aria-label="X axis band" value={scatterXBand} onChange={(event) => {
+                  const band = Number(event.target.value);
+                  setScatterXBand(band);
+                  fetchScatterPlotData(scatterXFile, band, scatterYFile, scatterYBand);
+                }}>
+                  {Array.from({ length: scatterXBandCount }, (_, index) => <option key={index + 1} value={index + 1}>Band {index + 1}</option>)}
+                </select>
+              </div>
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-              <label style={{ fontSize: "11px", color: "#94a3b8", width: "50px" }}>Y-Axis:</label>
-              <select value={scatterYFile} onChange={(e) => { const f = e.target.value; setScatterYFile(f); fetchScatterPlotData(scatterXFile, scatterXBand, f, scatterYBand); }} style={{ ...styles.selectInput, flex: 1 }}>
-                {activeFilesPool.map((f) => <option key={`sy-${f}`} value={f}>{getDisplayName(f)}</option>)}
-              </select>
-              <select value={scatterYBand} onChange={(e) => { const b = Number(e.target.value); setScatterYBand(b); fetchScatterPlotData(scatterXFile, scatterXBand, scatterYFile, b); }} style={styles.selectInput}>
-                <option value={1}>Band 1</option>
-              </select>
-              {isScatterLoading && <span style={styles.inlineSpinner} />}
+            <div className="scatter-axis-config">
+              <span className="scatter-axis-badge scatter-y-badge">Y</span>
+              <div className="scatter-axis-fields">
+                <select aria-label="Y axis raster" value={scatterYFile} onChange={(event) => {
+                  const file = event.target.value;
+                  setScatterYFile(file);
+                  setScatterYBand(1);
+                  fetchScatterPlotData(scatterXFile, scatterXBand, file, 1);
+                }}>
+                  {activeFilesPool.map((file) => <option key={`sy-${file}`} value={file}>{getDisplayName(file)}</option>)}
+                </select>
+                <select aria-label="Y axis band" value={scatterYBand} onChange={(event) => {
+                  const band = Number(event.target.value);
+                  setScatterYBand(band);
+                  fetchScatterPlotData(scatterXFile, scatterXBand, scatterYFile, band);
+                }}>
+                  {Array.from({ length: scatterYBandCount }, (_, index) => <option key={index + 1} value={index + 1}>Band {index + 1}</option>)}
+                </select>
+              </div>
             </div>
           </div>
           {isScatterLoading ? (
-            <div style={{ textAlign: "center", padding: "40px", color: "#94a3b8", fontSize: "12px" }}>Computing scatter plot...</div>
-          ) : scatterData && scatterData.points ? (
-            <div>
-              <div style={{ position: "relative", width: "100%", height: "200px", background: "#14171d", border: "1px solid #2a2d34", borderRadius: "6px", overflow: "hidden" }}>
-                {scatterData.points.map((pt, idx) => {
-                  const left = Math.min(Math.max((pt.x / (scatterData.xMax || 255)) * 100, 2), 98);
-                  const bottom = Math.min(Math.max((pt.y / (scatterData.yMax || 255)) * 100, 2), 98);
-                  return (
-                    <div key={idx} style={{ position: "absolute", left: `${left}%`, bottom: `${bottom}%`, width: "4px", height: "4px", backgroundColor: "#38bdf8", borderRadius: "50%", transform: "translate(-50%, 50%)", opacity: 0.7 }} />
-                  );
-                })}
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "10px", color: "#64748b", marginTop: "6px" }}>
-                <span>X Values</span><span>Y Values</span>
-              </div>
-            </div>
+            <div className="analysis-loading"><span className="analysis-spinner" />Sampling paired raster values</div>
+          ) : scatterError ? (
+            <div className="analysis-error">{scatterError}</div>
+          ) : scatterData?.points?.length ? (
+            (() => {
+              const xRange = scatterData.xMax - scatterData.xMin || 1;
+              const yRange = scatterData.yMax - scatterData.yMin || 1;
+              const meanX = scatterData.points.reduce((sum, point) => sum + point.x, 0) / scatterData.points.length;
+              const meanY = scatterData.points.reduce((sum, point) => sum + point.y, 0) / scatterData.points.length;
+              const covariance = scatterData.points.reduce((sum, point) => sum + (point.x - meanX) * (point.y - meanY), 0);
+              const varianceX = scatterData.points.reduce((sum, point) => sum + (point.x - meanX) ** 2, 0);
+              const varianceY = scatterData.points.reduce((sum, point) => sum + (point.y - meanY) ** 2, 0);
+              const correlation = varianceX && varianceY ? covariance / Math.sqrt(varianceX * varianceY) : 0;
+              return <>
+                <div className="scatter-plot-summary"><span>{scatterData.points.length.toLocaleString()} paired samples</span><span>Correlation <strong>{correlation.toFixed(3)}</strong></span></div>
+                <div className="scatter-plot-stage">
+                  <div className="scatter-grid-lines" />
+                  {scatterData.points.map((point, index) => {
+                    const left = Math.min(100, Math.max(0, ((point.x - scatterData.xMin) / xRange) * 100));
+                    const bottom = Math.min(100, Math.max(0, ((point.y - scatterData.yMin) / yRange) * 100));
+                    return <div key={index} title={`X ${point.x.toPrecision(5)} · Y ${point.y.toPrecision(5)}`} className="scatter-dot" style={{ left: `${left}%`, bottom: `${bottom}%` }} />;
+                  })}
+                </div>
+                <div className="scatter-axis-ticks"><span>{scatterData.xMin.toPrecision(5)}</span><span>{meanX.toPrecision(5)}</span><span>{scatterData.xMax.toPrecision(5)}</span></div>
+                <div className="scatter-axis-caption"><span>X: {getDisplayName(scatterXFile)} · Band {scatterXBand}</span><span>Y: {getDisplayName(scatterYFile)} · Band {scatterYBand}</span></div>
+                <div className="scatter-y-range">Y range {scatterData.yMin.toPrecision(5)} – {scatterData.yMax.toPrecision(5)}</div>
+              </>;
+            })()
           ) : (
-            <div style={{ color: "#ef4444", fontSize: "12px" }}>No scatter data returned</div>
+            <div className="analysis-empty">Choose two raster bands to calculate a comparison.</div>
           )}
         </div>
       )}
 
       {showProfileModal && (
-        <div style={{ ...styles.sidePanel, right: showHistogram ? "360px" : 0 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
-            <h3 style={{ margin: 0, fontSize: "14px", color: "#f8fafc" }}>Raster Cross-Section Profile</h3>
-            <button style={{ background: "none", border: "none", color: "#94a3b8", cursor: "pointer" }} onClick={() => setShowProfileModal(false)}>✕</button>
+        <div className="analysis-panel" style={styles.sidePanel}>
+          <div className="analysis-panel-header">
+            <div><div className="analysis-kicker">TRANSECT ANALYSIS</div><h3>Profile plot</h3></div>
+            <button className="analysis-close" aria-label="Close profile plot" onClick={() => { setShowProfileModal(false); setIsProfileMode(false); }}>×</button>
           </div>
-          <div style={{ display: "flex", gap: "8px", marginBottom: "16px", alignItems: "center" }}>
-            <label style={{ fontSize: "11px", color: "#94a3b8" }}>Layer/Band:</label>
-            <select value={profileFile} onChange={(e) => { const f = e.target.value; setProfileFile(f); if (profileStart && profileEnd) fetchProfilePlot(profileStart, profileEnd, f, selectedProfileBand); }} style={{ ...styles.selectInput, flex: 1 }}>
-              {activeFilesPool.map((f) => <option key={`pf-${f}`} value={f}>{getDisplayName(f)}</option>)}
-            </select>
-            {isProfileLoading && <span style={styles.inlineSpinner} />}
+          <div className="profile-config">
+            <label><span>Source raster</span><select value={profileFile} onChange={(event) => {
+              const file = event.target.value;
+              setProfileFile(file);
+              setSelectedProfileBand(1);
+              if (profileStart && profileEnd) fetchProfilePlot(profileStart, profileEnd, file, 1);
+            }}>
+              {activeFilesPool.map((file) => <option key={`pf-${file}`} value={file}>{getDisplayName(file)}</option>)}
+            </select></label>
+            <label><span>Band</span><select value={selectedProfileBand} onChange={(event) => {
+              const band = Number(event.target.value);
+              setSelectedProfileBand(band);
+              if (profileStart && profileEnd) fetchProfilePlot(profileStart, profileEnd, profileFile, band);
+            }}>
+              {Array.from({ length: profileBandCount }, (_, index) => <option key={index + 1} value={index + 1}>Band {index + 1}</option>)}
+            </select></label>
           </div>
+          {isProfileMode ? (
+            <div className="analysis-instruction"><span className="analysis-step">{profileStart ? "2" : "1"}</span><div><strong>{profileStart ? "Choose the end point" : "Choose the start point"}</strong><span>{profileStart ? `Start: pixel ${profileStart.x}, ${profileStart.y}` : "Click the image to place the profile start."}</span></div><button onClick={() => { setIsProfileMode(false); setProfileStart(null); setProfileEnd(null); }}>Cancel</button></div>
+          ) : null}
           {isProfileLoading ? (
-            <div style={{ textAlign: "center", padding: "40px", color: "#94a3b8", fontSize: "12px" }}>Calculating profile slice...</div>
-          ) : profileData && profileData.values ? (
-            <div>
-              <div style={{ display: "flex", alignItems: "flex-end", height: "130px", gap: "2px", borderBottom: "1px solid #2a2d34", paddingBottom: "2px", marginBottom: "8px" }}>
-                {profileData.values.map((val, idx) => {
-                  const min = profileData.min;
-                  const max = profileData.max === min ? min + 1 : profileData.max;
-                  const pct = Math.max(Math.min(Math.round(((val - min) / (max - min)) * 100), 100), 2);
-                  return (
-                    <div key={idx} title={`Value: ${val.toFixed(2)}`} style={{ flex: 1, height: "100%", display: "flex", alignItems: "flex-end" }}>
-                      <div style={{ width: "100%", height: `${pct}%`, backgroundColor: "#10b981", borderRadius: "1px 1px 0 0" }} />
-                    </div>
-                  );
-                })}
+            <div className="analysis-loading"><span className="analysis-spinner" />Sampling raster profile</div>
+          ) : profileError ? (
+            <div className="analysis-error">{profileError}</div>
+          ) : profileData?.values?.length ? (
+            <>
+              <div className="profile-chart-heading"><span>Pixel values</span><span>{profileData.values.length} samples</span></div>
+              <div className="profile-chart-stage">
+                <div className="profile-chart-grid" />
+                <svg viewBox="0 0 1000 300" preserveAspectRatio="none" role="img" aria-label={`Band ${selectedProfileBand} pixel profile`}>
+                  <polyline fill="none" stroke="#68bdad" strokeWidth="3" vectorEffect="non-scaling-stroke" points={profileData.values.map((value, index) => {
+                    const valueRange = profileData.max - profileData.min || 1;
+                    const x = profileData.values.length < 2 ? 500 : (index / (profileData.values.length - 1)) * 1000;
+                    const y = 290 - ((value - profileData.min) / valueRange) * 280;
+                    return `${x},${y}`;
+                  }).join(" ")} />
+                </svg>
               </div>
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "10px", color: "#64748b", marginBottom: "16px" }}>
-                <span>Start (Distance 0)</span><span>End (Distance Max)</span>
+              <div className="profile-chart-axis"><span>Start · {profileData.start.x}, {profileData.start.y}</span><span>End · {profileData.end.x}, {profileData.end.y}</span></div>
+              <div className="profile-statistics">
+                <div><span>Minimum</span><strong>{profileData.min.toPrecision(5)}</strong></div>
+                <div><span>Maximum</span><strong>{profileData.max.toPrecision(5)}</strong></div>
+                <div><span>Mean</span><strong>{(profileData.values.reduce((sum, value) => sum + value, 0) / profileData.values.length).toPrecision(5)}</strong></div>
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "6px", fontSize: "11px", color: "#94a3b8", background: "#14171d", padding: "8px", borderRadius: "4px", border: "1px solid #1e222d" }}>
-                <div>Min: {profileData.min.toFixed(2)}</div>
-                <div>Max: {profileData.max.toFixed(2)}</div>
+            </>
+          ) : !isProfileMode ? (
+            <div className="analysis-empty">Choose Profile Plot, then click two points on the raster.</div>
+          ) : null}
+        </div>
+      )}
+
+      {showRoiPanel && (
+        <div style={styles.sidePanel}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+            <h3 style={{ margin: 0, fontSize: "14px", color: "#f8fafc" }}>Region of Interest</h3>
+            <button style={{ background: "none", border: "none", color: "#94a3b8", cursor: "pointer", fontSize: "16px" }} onClick={() => { setShowRoiPanel(false); setIsRoiDrawing(false); }}>✕</button>
+          </div>
+          {roiSelection ? (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "6px", padding: "10px", marginBottom: "12px", background: "#14171d", border: "1px solid #2a2d34", borderRadius: "4px", color: "#cbd5e1", fontSize: "11px" }}>
+                <div>X: <strong>{roiSelection.x}</strong></div>
+                <div>Y: <strong>{roiSelection.y}</strong></div>
+                <div>Width: <strong>{roiSelection.width}</strong></div>
+                <div>Height: <strong>{roiSelection.height}</strong></div>
+                <div style={{ gridColumn: "1 / -1" }}>Pixels: <strong>{(roiSelection.width * roiSelection.height).toLocaleString()}</strong></div>
               </div>
-            </div>
+              {roiAnalysis?.extent?.geographic_bounds && (
+                <div style={{ color: "#94a3b8", fontSize: "10px", lineHeight: 1.5, marginBottom: "12px" }}>
+                  Geographic extent (W, S, E, N): {roiAnalysis.extent.geographic_bounds.map((value) => value.toFixed(6)).join(", ")}
+                </div>
+              )}
+              {roiAnalysis?.extent?.crs && <div style={{ color: "#64748b", fontSize: "10px", marginBottom: "12px" }}>Source CRS: {roiAnalysis.extent.crs}</div>}
+              {isRoiLoading ? (
+                <div style={{ textAlign: "center", padding: "28px", color: "#94a3b8", fontSize: "12px" }}>Analyzing selected pixels across bands…</div>
+              ) : roiAnalysis ? (
+                <>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "12px 0 6px" }}>
+                    <strong style={{ color: "#e2e8f0", fontSize: "12px" }}>Spectral profile</strong>
+                    <span style={{ color: "#64748b", fontSize: "10px" }}>{roiAnalysis.bands.length} bands</span>
+                  </div>
+                  {(() => {
+                    const valid = roiAnalysis.bands.filter((item) => Number.isFinite(item.mean));
+                    const minimum = valid.length ? Math.min(...valid.map((item) => item.mean)) : 0;
+                    const maximum = valid.length ? Math.max(...valid.map((item) => item.mean)) : 1;
+                    const range = maximum === minimum ? 1 : maximum - minimum;
+                    return <div style={{ height: "112px", overflowX: "auto", overflowY: "hidden", background: "#101319", borderBottom: "1px solid #334155", marginBottom: "4px" }}>
+                      <div style={{ height: "100%", minWidth: `${Math.max(100, roiAnalysis.bands.length * 2)}px`, display: "flex", alignItems: "flex-end", gap: "1px", padding: "4px 2px 0" }}>
+                        {roiAnalysis.bands.map((item) => {
+                          const height = Number.isFinite(item.mean) ? Math.max(2, ((item.mean - minimum) / range) * 100) : 0;
+                          return <div key={item.band} title={`Band ${item.band}: ${item.mean == null ? "no data" : item.mean}`} style={{ flex: 1, minWidth: "1px", height: `${height}%`, background: "#39b7a5", opacity: item.band === selectedRoiBand ? 1 : 0.7 }} />;
+                        })}
+                      </div>
+                    </div>;
+                  })()}
+                  <div style={{ display: "flex", justifyContent: "space-between", color: "#64748b", fontSize: "9px", marginBottom: "14px" }}><span>Band 1</span><span>Band {roiAnalysis.bands.length}</span></div>
+
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "7px" }}>
+                    <strong style={{ color: "#e2e8f0", fontSize: "12px" }}>ROI histogram</strong>
+                    <select value={selectedRoiBand} onChange={(event) => setSelectedRoiBand(Number(event.target.value))} style={styles.selectInput}>
+                      {roiAnalysis.bands.map((item) => <option key={item.band} value={item.band}>Band {item.band}</option>)}
+                    </select>
+                  </div>
+                  {(() => {
+                    const histogram = roiAnalysis.histograms.find((item) => item.band === selectedRoiBand);
+                    const maxCount = Math.max(1, ...(histogram?.counts || []));
+                    return histogram?.binEdges.length ? <div style={{ height: "100px", display: "flex", alignItems: "flex-end", gap: "2px", padding: "6px 4px", background: "#14171d", border: "1px solid #2a2d34" }}>
+                      {histogram.counts.map((count, index) => <div key={index} title={`${histogram.binEdges[index].toPrecision(4)} – ${histogram.binEdges[index + 1].toPrecision(4)}: ${count}`} style={{ flex: 1, minWidth: "2px", height: `${Math.max(1, (count / maxCount) * 100)}%`, background: "#5ca6dc" }} />)}
+                    </div> : <div style={{ color: "#64748b", fontSize: "11px", padding: "18px 0" }}>No valid pixels in this band.</div>;
+                  })()}
+
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "14px 0 6px" }}>
+                    <strong style={{ color: "#e2e8f0", fontSize: "12px" }}>Band statistics</strong>
+                    <span style={{ color: "#64748b", fontSize: "9px" }}>min · max · mean · median · std</span>
+                  </div>
+                  <div style={{ maxHeight: "180px", overflow: "auto", border: "1px solid #2a2d34" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", color: "#cbd5e1", fontSize: "10px", textAlign: "right" }}>
+                      <thead><tr style={{ position: "sticky", top: 0, background: "#1b202a", color: "#94a3b8" }}><th style={{ padding: "5px", textAlign: "left" }}>Band</th><th>Min</th><th>Max</th><th>Mean</th><th>Median</th><th>Std</th></tr></thead>
+                      <tbody>{roiAnalysis.bands.map((item) => <tr key={item.band} style={{ borderTop: "1px solid #242a34", background: item.band === selectedRoiBand ? "rgba(57,183,165,0.08)" : "transparent" }}>
+                        <td style={{ padding: "5px", textAlign: "left" }}>{item.band}</td>
+                        {[item.min, item.max, item.mean, item.median, item.std].map((value, index) => <td key={index} style={{ padding: "5px" }}>{Number.isFinite(value) ? value.toPrecision(5) : "—"}</td>)}
+                      </tr>)}</tbody>
+                    </table>
+                  </div>
+                  <button style={{ ...styles.iconBtn, width: "100%", marginTop: "14px", background: "#0e7490", justifyContent: "center", opacity: isRoiAiLoading ? 0.7 : 1 }} onClick={analyzeRoiWithAi} disabled={isRoiAiLoading}>
+                    {isRoiAiLoading ? "Analyzing ROI…" : "Analyze ROI with AI"}
+                  </button>
+                  {roiAiAnalysis && <div style={{ marginTop: "10px", padding: "10px", background: "#14171d", border: "1px solid #2a2d34", color: "#cbd5e1", fontSize: "11px", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{roiAiAnalysis}</div>}
+                  <button style={{ ...styles.iconBtn, width: "100%", marginTop: "8px", justifyContent: "center" }} onClick={() => { setRoiSelection(null); setRoiAnalysis(null); setRoiAiAnalysis(""); setRoiScreenRect(null); setIsRoiDrawing(true); }}>Draw another ROI</button>
+                </>
+              ) : !isRoiLoading ? <div style={{ color: "#64748b", fontSize: "11px" }}>ROI statistics are unavailable.</div> : null}
+            </>
           ) : (
-            <div style={{ color: "#ef4444", fontSize: "12px" }}>No profile data found</div>
+            <div style={{ color: "#94a3b8", fontSize: "12px", lineHeight: 1.5 }}>
+              {isRoiDrawing ? "Drag a rectangle across the raster." : "Choose ROI Rectangle, then drag across the raster."}
+            </div>
           )}
         </div>
       )}
@@ -3313,7 +3873,7 @@ const styles = {
   stretchInput: { background: "#0b0d11", color: "#f8fafc", border: "1px solid #2a2d34", padding: "5px 8px", borderRadius: "5px", fontSize: "11px", outline: "none", width: "50%" },
   inlineSpinner: { width: "12px", height: "12px", border: "2px solid #38bdf8", borderTopColor: "transparent", borderRadius: "50%", animation: "spin 0.8s linear infinite", flexShrink: 0 },
   divider: { width: "1px", height: "36px", backgroundColor: "#1e222d", flexShrink: 0 },
-  metaStrip: { height: "32px", backgroundColor: "#0b0d11", borderBottom: "1px solid #1e222d", display: "flex", alignItems: "center", padding: "0 20px", gap: "20px", fontSize: "12px", color: "#94a3b8", flexShrink: 0 },
+  metaStrip: { height: "32px", backgroundColor: "#0b0d11", borderBottom: "1px solid #1e222d", display: "flex", alignItems: "center", padding: "0 20px", gap: "20px", fontSize: "12px", color: "#94a3b8", flexShrink: 0, overflowX: "auto", overflowY: "hidden" },
   viewport: { flex: 1, position: "relative", overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center", backgroundColor: "#07090c" },
   rasterImageStyle: { position: "absolute", maxWidth: "none", maxHeight: "none", pointerEvents: "none", display: "block" },
   placeholder: { color: "#475569", fontSize: "14px", fontStyle: "italic" },

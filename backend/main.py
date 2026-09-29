@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query, Body
 from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
@@ -10,6 +10,10 @@ from io import BytesIO
 from pathlib import Path
 from typing import Optional
 import math
+import json
+import os
+import urllib.error
+import urllib.request
 from collections import OrderedDict
 import threading
 
@@ -507,33 +511,41 @@ def get_tile(
 
 
 @app.get("/api/rgb-overview")
-def get_rgb_overview(r_file: str = Query(...), g_file: str = Query(...), b_file: str = Query(...), r_min: Optional[float] = Query(None), r_max: Optional[float] = Query(None), g_min: Optional[float] = Query(None), g_max: Optional[float] = Query(None), b_min: Optional[float] = Query(None), b_max: Optional[float] = Query(None), max_size: int = Query(400)):
+def get_rgb_overview(r_file: str = Query(...), g_file: str = Query(...), b_file: str = Query(...), r_band: int = Query(1), g_band: int = Query(1), b_band: int = Query(1), r_min: Optional[float] = Query(None), r_max: Optional[float] = Query(None), g_min: Optional[float] = Query(None), g_max: Optional[float] = Query(None), b_min: Optional[float] = Query(None), b_max: Optional[float] = Query(None), max_size: int = Query(400)):
     max_size = max(120, min(int(max_size), 500))
     try:
-        r_path = validate_file_exists(r_file)
-        g_path = validate_file_exists(g_file)
-        b_path = validate_file_exists(b_file)
+        r_path = validate_file_exists(r_file.split("::band")[0] if "::band" in r_file else r_file)
+        g_path = validate_file_exists(g_file.split("::band")[0] if "::band" in g_file else g_file)
+        b_path = validate_file_exists(b_file.split("::band")[0] if "::band" in b_file else b_file)
         with rasterio.open(r_path) as r_src, rasterio.open(g_path) as g_src, rasterio.open(b_path) as b_src:
+            if r_band < 1 or r_band > r_src.count: raise HTTPException(status_code=400, detail="Invalid red band")
+            if g_band < 1 or g_band > g_src.count: raise HTTPException(status_code=400, detail="Invalid green band")
+            if b_band < 1 or b_band > b_src.count: raise HTTPException(status_code=400, detail="Invalid blue band")
             out_w, out_h = preview_dimensions(r_src.width, r_src.height, max_size)
-            r_data = r_src.read(1, out_shape=(out_h, out_w), resampling=Resampling.average, masked=True)
-            g_data = g_src.read(1, out_shape=(out_h, out_w), resampling=Resampling.average, masked=True)
-            b_data = b_src.read(1, out_shape=(out_h, out_w), resampling=Resampling.average, masked=True)
+            r_data = r_src.read(r_band, out_shape=(out_h, out_w), resampling=Resampling.average, masked=True)
+            g_data = g_src.read(g_band, out_shape=(out_h, out_w), resampling=Resampling.average, masked=True)
+            b_data = b_src.read(b_band, out_shape=(out_h, out_w), resampling=Resampling.average, masked=True)
             red = brighten_preview(r_data, r_src.nodata) if (r_min is None or r_max is None or r_max <= r_min) else manual_or_auto_stretch(r_data, r_src.nodata, r_min, r_max)
             green = brighten_preview(g_data, g_src.nodata) if (g_min is None or g_max is None or g_max <= g_min) else manual_or_auto_stretch(g_data, g_src.nodata, g_min, g_max)
             blue = brighten_preview(b_data, b_src.nodata) if (b_min is None or b_max is None or b_max <= b_min) else manual_or_auto_stretch(b_data, b_src.nodata, b_min, b_max)
             image = Image.fromarray(np.dstack((red, green, blue)), mode="RGB")
             return jpeg_response(image, quality=60)
+    except HTTPException:
+        raise
     except Exception as error:
         raise HTTPException(status_code=500, detail=str(error))
 
 
 @app.get("/api/rgb-tile")
-def get_rgb_tile(r_file: str = Query(...), g_file: str = Query(...), b_file: str = Query(...), z: int = Query(...), x: int = Query(...), y: int = Query(...), r_min: Optional[float] = Query(None), r_max: Optional[float] = Query(None), g_min: Optional[float] = Query(None), g_max: Optional[float] = Query(None), b_min: Optional[float] = Query(None), b_max: Optional[float] = Query(None)):
-    r_path = validate_file_exists(r_file)
-    g_path = validate_file_exists(g_file)
-    b_path = validate_file_exists(b_file)
+def get_rgb_tile(r_file: str = Query(...), g_file: str = Query(...), b_file: str = Query(...), r_band: int = Query(1), g_band: int = Query(1), b_band: int = Query(1), z: int = Query(...), x: int = Query(...), y: int = Query(...), r_min: Optional[float] = Query(None), r_max: Optional[float] = Query(None), g_min: Optional[float] = Query(None), g_max: Optional[float] = Query(None), b_min: Optional[float] = Query(None), b_max: Optional[float] = Query(None)):
+    r_path = validate_file_exists(r_file.split("::band")[0] if "::band" in r_file else r_file)
+    g_path = validate_file_exists(g_file.split("::band")[0] if "::band" in g_file else g_file)
+    b_path = validate_file_exists(b_file.split("::band")[0] if "::band" in b_file else b_file)
     try:
         with rasterio.open(r_path) as r_src, rasterio.open(g_path) as g_src, rasterio.open(b_path) as b_src:
+            if r_band < 1 or r_band > r_src.count: raise HTTPException(status_code=400, detail="Invalid red band")
+            if g_band < 1 or g_band > g_src.count: raise HTTPException(status_code=400, detail="Invalid green band")
+            if b_band < 1 or b_band > b_src.count: raise HTTPException(status_code=400, detail="Invalid blue band")
             if z < 0 or x < 0 or y < 0:
                 raise HTTPException(status_code=400, detail="Invalid tile coordinates")
             max_dim = max(r_src.width, r_src.height, 1)
@@ -550,19 +562,19 @@ def get_rgb_tile(r_file: str = Query(...), g_file: str = Query(...), b_file: str
             if left >= r_src.width or top >= r_src.height or right <= left or bottom <= top:
                 return Response(status_code=204)
 
-            def read_ch(src):
+            def read_ch(src, band):
                 window = Window(col_off=left, row_off=top, width=min(right, src.width) - left, height=min(bottom, src.height) - top)
                 resampling = Resampling.nearest if source_scale == 1 else Resampling.cubic
-                return src.read(1, window=window, out_shape=(TILE_SIZE, TILE_SIZE), resampling=resampling, masked=True)
+                return src.read(band, window=window, out_shape=(TILE_SIZE, TILE_SIZE), resampling=resampling, masked=True)
 
-            def stretch_ch(data, src, lo, hi):
+            def stretch_ch(data, src, band, lo, hi):
                 if lo is None or hi is None or hi <= lo:
-                    lo, hi = get_global_stretch_limits(src, band=1)
+                    lo, hi = get_global_stretch_limits(src, band=band)
                 return manual_or_auto_stretch(data, src.nodata, lo, hi)
 
-            red = stretch_ch(read_ch(r_src), r_src, r_min, r_max)
-            green = stretch_ch(read_ch(g_src), g_src, g_min, g_max)
-            blue = stretch_ch(read_ch(b_src), b_src, b_min, b_max)
+            red = stretch_ch(read_ch(r_src, r_band), r_src, r_band, r_min, r_max)
+            green = stretch_ch(read_ch(g_src, g_band), g_src, g_band, g_min, g_max)
+            blue = stretch_ch(read_ch(b_src, b_band), b_src, b_band, b_min, b_max)
             output = BytesIO()
             Image.fromarray(np.dstack((red, green, blue)), mode="RGB").save(output, format="JPEG", quality=95, subsampling=0, optimize=False)
             return Response(content=output.getvalue(), media_type="image/jpeg", headers={"Cache-Control": "public, max-age=3600", "X-Tile-Level": str(z), "X-Tile-Source-Scale": str(source_scale)})
@@ -573,21 +585,26 @@ def get_rgb_tile(r_file: str = Query(...), g_file: str = Query(...), b_file: str
 
 
 @app.get("/api/rgb-composite")
-def get_rgb_composite(r_file: str = Query(...), g_file: str = Query(...), b_file: str = Query(...), r_min: Optional[float] = Query(None), r_max: Optional[float] = Query(None), g_min: Optional[float] = Query(None), g_max: Optional[float] = Query(None), b_min: Optional[float] = Query(None), b_max: Optional[float] = Query(None), max_size: int = Query(800)):
+def get_rgb_composite(r_file: str = Query(...), g_file: str = Query(...), b_file: str = Query(...), r_band: int = Query(1), g_band: int = Query(1), b_band: int = Query(1), r_min: Optional[float] = Query(None), r_max: Optional[float] = Query(None), g_min: Optional[float] = Query(None), g_max: Optional[float] = Query(None), b_min: Optional[float] = Query(None), b_max: Optional[float] = Query(None), max_size: int = Query(800)):
     try:
-        r_path = validate_file_exists(r_file)
-        g_path = validate_file_exists(g_file)
-        b_path = validate_file_exists(b_file)
+        r_path = validate_file_exists(r_file.split("::band")[0] if "::band" in r_file else r_file)
+        g_path = validate_file_exists(g_file.split("::band")[0] if "::band" in g_file else g_file)
+        b_path = validate_file_exists(b_file.split("::band")[0] if "::band" in b_file else b_file)
         with rasterio.open(r_path) as r_src, rasterio.open(g_path) as g_src, rasterio.open(b_path) as b_src:
+            if r_band < 1 or r_band > r_src.count: raise HTTPException(status_code=400, detail="Invalid red band")
+            if g_band < 1 or g_band > g_src.count: raise HTTPException(status_code=400, detail="Invalid green band")
+            if b_band < 1 or b_band > b_src.count: raise HTTPException(status_code=400, detail="Invalid blue band")
             out_w, out_h = preview_dimensions(r_src.width, r_src.height, max_size)
-            r_data = r_src.read(1, out_shape=(out_h, out_w), resampling=Resampling.average, masked=True)
-            g_data = g_src.read(1, out_shape=(out_h, out_w), resampling=Resampling.average, masked=True)
-            b_data = b_src.read(1, out_shape=(out_h, out_w), resampling=Resampling.average, masked=True)
+            r_data = r_src.read(r_band, out_shape=(out_h, out_w), resampling=Resampling.average, masked=True)
+            g_data = g_src.read(g_band, out_shape=(out_h, out_w), resampling=Resampling.average, masked=True)
+            b_data = b_src.read(b_band, out_shape=(out_h, out_w), resampling=Resampling.average, masked=True)
             red = manual_or_auto_stretch(r_data, r_src.nodata, r_min, r_max)
             green = manual_or_auto_stretch(g_data, g_src.nodata, g_min, g_max)
             blue = manual_or_auto_stretch(b_data, b_src.nodata, b_min, b_max)
             image = Image.fromarray(np.dstack((red, green, blue)), mode="RGB")
             return jpeg_response(image, quality=JPEG_QUALITY)
+    except HTTPException:
+        raise
     except Exception as error:
         raise HTTPException(status_code=500, detail=str(error))
 
@@ -612,6 +629,114 @@ def get_histogram(filename: str = Query(...), band: int = Query(1), bins: int = 
         raise
     except Exception as error:
         raise HTTPException(status_code=500, detail=str(error))
+
+
+@app.post("/api/roi-analysis")
+def analyze_roi(payload: dict = Body(...)):
+    filename = str(payload.get("filename", ""))
+    file_path = validate_file_exists(filename)
+    try:
+        x = int(payload.get("x", -1))
+        y = int(payload.get("y", -1))
+        width = int(payload.get("width", 0))
+        height = int(payload.get("height", 0))
+        if x < 0 or y < 0 or width <= 0 or height <= 0:
+            raise HTTPException(status_code=400, detail="ROI coordinates and dimensions must be positive")
+
+        with rasterio.open(file_path) as src:
+            if x + width > src.width or y + height > src.height:
+                raise HTTPException(status_code=400, detail="ROI extends beyond raster bounds")
+
+            window = Window(col_off=x, row_off=y, width=width, height=height)
+            band_stats = []
+            histograms = []
+            for band in range(1, src.count + 1):
+                data = src.read(band, window=window, masked=True)
+                values = np.asarray(data.compressed(), dtype=np.float64)
+                values = values[np.isfinite(values)]
+                if values.size:
+                    band_stats.append({
+                        "band": band,
+                        "count": int(values.size),
+                        "min": float(values.min()),
+                        "max": float(values.max()),
+                        "mean": float(values.mean()),
+                        "median": float(np.median(values)),
+                        "std": float(values.std()),
+                    })
+                    counts, edges = np.histogram(values, bins=32)
+                    histograms.append({"band": band, "counts": counts.tolist(), "binEdges": edges.tolist()})
+                else:
+                    band_stats.append({
+                        "band": band, "count": 0, "min": None, "max": None,
+                        "mean": None, "median": None, "std": None,
+                    })
+                    histograms.append({"band": band, "counts": [0] * 32, "binEdges": []})
+
+            extent = rasterio.windows.bounds(window, src.transform)
+            geographic_extent = None
+            if src.crs:
+                try:
+                    from rasterio.warp import transform_bounds
+                    geographic_extent = transform_bounds(src.crs, "EPSG:4326", *extent, densify_pts=21)
+                except Exception:
+                    geographic_extent = None
+
+            return {
+                "filename": filename,
+                "roi": {
+                    "x": x, "y": y, "width": width, "height": height,
+                    "pixel_count": width * height,
+                },
+                "extent": {
+                    "crs": str(src.crs) if src.crs else None,
+                    "bounds": list(extent),
+                    "geographic_bounds": list(geographic_extent) if geographic_extent else None,
+                },
+                "bands": band_stats,
+                "histograms": histograms,
+            }
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+
+@app.post("/api/roi-ai-analysis")
+def analyze_roi_with_ai(payload: dict = Body(...)):
+    api_key = os.environ.get("AI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="AI analysis is not configured. Set AI_API_KEY on the backend.")
+
+    roi = payload.get("roi")
+    bands = payload.get("bands")
+    if not isinstance(roi, dict) or not isinstance(bands, list) or not bands:
+        raise HTTPException(status_code=400, detail="ROI and band statistics are required")
+
+    endpoint = os.environ.get("AI_API_URL", "https://api.openai.com/v1/chat/completions")
+    model = os.environ.get("AI_MODEL", "gpt-4o-mini")
+    request_body = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "You are a remote-sensing analyst. Interpret only the provided ROI raster statistics. State uncertainty and do not infer location-specific facts absent evidence."},
+            {"role": "user", "content": "Analyze this GeoTIFF region of interest. Describe notable cross-band patterns and caveats, without asserting land cover as certain.\n" + json.dumps({"roi": roi, "extent": payload.get("extent"), "bands": bands}, allow_nan=False)},
+        ],
+        "temperature": 0.2,
+    }
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(request_body).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        return {"analysis": result["choices"][0]["message"]["content"], "model": model}
+    except urllib.error.HTTPError as error:
+        raise HTTPException(status_code=502, detail=f"AI service returned HTTP {error.code}")
+    except (urllib.error.URLError, KeyError, IndexError, json.JSONDecodeError) as error:
+        raise HTTPException(status_code=502, detail=f"AI analysis failed: {error}")
 
 
 @app.get("/api/pixel-value")
