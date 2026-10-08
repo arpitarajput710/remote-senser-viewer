@@ -704,39 +704,189 @@ def analyze_roi(payload: dict = Body(...)):
 
 @app.post("/api/roi-ai-analysis")
 def analyze_roi_with_ai(payload: dict = Body(...)):
-    api_key = os.environ.get("AI_API_KEY")
+    """
+    Send already-computed ROI statistics to OpenAI for interpretation.
+
+    Scientific calculations are performed by Rasterio/NumPy before this
+    endpoint is called. The AI only interprets the supplied statistics.
+    """
+    api_key = (
+        os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("AI_API_KEY")
+    )
+
     if not api_key:
-        raise HTTPException(status_code=503, detail="AI analysis is not configured. Set AI_API_KEY on the backend.")
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "OpenAI API key is not configured. "
+                "Set OPENAI_API_KEY in the backend environment."
+            ),
+        )
 
     roi = payload.get("roi")
     bands = payload.get("bands")
-    if not isinstance(roi, dict) or not isinstance(bands, list) or not bands:
-        raise HTTPException(status_code=400, detail="ROI and band statistics are required")
 
-    endpoint = os.environ.get("AI_API_URL", "https://api.openai.com/v1/chat/completions")
-    model = os.environ.get("AI_MODEL", "gpt-4o-mini")
+    if not isinstance(roi, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="ROI information is required."
+        )
+
+    if not isinstance(bands, list) or not bands:
+        raise HTTPException(
+            status_code=400,
+            detail="Band statistics are required."
+        )
+
+    model = os.environ.get("AI_MODEL", "gpt-5.6-sol")
+
+    analysis_data = {
+        "roi": roi,
+        "extent": payload.get("extent"),
+        "bands": bands,
+    }
+
+    system_prompt = """
+You are an expert remote-sensing image analyst.
+
+You are given statistics calculated directly from a GeoTIFF ROI
+using Rasterio and NumPy.
+
+Your job is ONLY to interpret the supplied measurements.
+
+Rules:
+- Do not invent measurements.
+- Do not invent bands.
+- Do not claim a land-cover class with certainty unless the supplied
+  measurements support it.
+- Explain important cross-band patterns.
+- Mention unusual values or variability when relevant.
+- Clearly distinguish observation from interpretation.
+- Keep the answer useful for a remote-sensing engineer.
+- Use the exact numeric values supplied when discussing measurements.
+"""
+
+    user_prompt = (
+        "Analyze the following remote-sensing ROI statistics.\n\n"
+        + json.dumps(analysis_data, indent=2, allow_nan=False)
+    )
+
     request_body = {
         "model": model,
-        "messages": [
-            {"role": "system", "content": "You are a remote-sensing analyst. Interpret only the provided ROI raster statistics. State uncertainty and do not infer location-specific facts absent evidence."},
-            {"role": "user", "content": "Analyze this GeoTIFF region of interest. Describe notable cross-band patterns and caveats, without asserting land cover as certain.\n" + json.dumps({"roi": roi, "extent": payload.get("extent"), "bands": bands}, allow_nan=False)},
+        "input": [
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": system_prompt,
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": user_prompt,
+                    }
+                ],
+            },
         ],
-        "temperature": 0.2,
     }
+
     request = urllib.request.Request(
-        endpoint,
+        "https://api.openai.com/v1/responses",
         data=json.dumps(request_body).encode("utf-8"),
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
         method="POST",
     )
+
     try:
-        with urllib.request.urlopen(request, timeout=45) as response:
-            result = json.loads(response.read().decode("utf-8"))
-        return {"analysis": result["choices"][0]["message"]["content"], "model": model}
+        with urllib.request.urlopen(request, timeout=60) as response:
+            result = json.loads(
+                response.read().decode("utf-8")
+            )
+
+        # Responses API normally provides output_text.
+        analysis = result.get("output_text")
+
+        # Defensive fallback in case output_text is not present.
+        if not analysis:
+            output_items = result.get("output", [])
+
+            parts = []
+
+            for item in output_items:
+                if item.get("type") != "message":
+                    continue
+
+                for content in item.get("content", []):
+                    if content.get("type") == "output_text":
+                        text_value = content.get("text")
+                        if text_value:
+                            parts.append(text_value)
+
+            analysis = "\n".join(parts).strip()
+
+        if not analysis:
+            raise HTTPException(
+                status_code=502,
+                detail="OpenAI returned an empty analysis."
+            )
+
+        return {
+            "success": True,
+            "analysis": analysis,
+            "model": model,
+        }
+
     except urllib.error.HTTPError as error:
-        raise HTTPException(status_code=502, detail=f"AI service returned HTTP {error.code}")
-    except (urllib.error.URLError, KeyError, IndexError, json.JSONDecodeError) as error:
-        raise HTTPException(status_code=502, detail=f"AI analysis failed: {error}")
+        try:
+            error_body = error.read().decode("utf-8")
+        except Exception:
+            error_body = ""
+
+        print(
+            f"OpenAI HTTP error {error.code}: {error_body}"
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"OpenAI returned HTTP {error.code}. "
+                f"{error_body[:500]}"
+            ),
+        )
+
+    except urllib.error.URLError as error:
+        print(f"OpenAI connection error: {error}")
+
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not connect to OpenAI: {error}",
+        )
+
+    except json.JSONDecodeError as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Invalid response from OpenAI: {error}",
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as error:
+        print(f"ROI AI error: {error}")
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"ROI AI analysis failed: {error}",
+        )
 
 
 @app.get("/api/pixel-value")
